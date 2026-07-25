@@ -1,4 +1,4 @@
-import { sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { channels, outboundSubs } from '../db/schema.js';
 
@@ -112,6 +112,18 @@ export async function saveImported(
       .returning({ id: outboundSubs.id });
 
     added += rows.length;
+
+    // Канал снова в экспорте — значит подписка снова есть. Иначе один раз
+    // сказанное «я отписался» (status='left') запирало бы запись навсегда:
+    // do nothing выше её не тронет, а в разметку она уже не попадёт.
+    await db
+      .update(outboundSubs)
+      .set({ status: 'active' })
+      .where(and(
+        eq(outboundSubs.ownerUserId, ownerUserId),
+        eq(outboundSubs.status, 'left'),
+        inArray(outboundSubs.chatId, chunk.map((c) => c.chatId)),
+      ));
   }
   return added;
 }

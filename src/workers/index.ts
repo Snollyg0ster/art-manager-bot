@@ -1,12 +1,22 @@
 import { Worker } from 'bullmq';
 import { eq } from 'drizzle-orm';
 import { bot } from '../bot/index.js';
-import { connection, type TriageLeaveJob } from '../queue.js';
+import { connection, type MatchJoinJob, type TriageLeaveJob } from '../queue.js';
 import { db } from '../db/index.js';
 import { channels, pairs } from '../db/schema.js';
-import { appendEvent, hasReturnedSince, projectMembership, isMember } from '../services/events.js';
-import { findPairByCounterpartUser, ownerOfChannel, setPairState } from '../services/pairs.js';
-import { createLeaveTriage, renderTriageCard } from '../services/triage.js';
+import {
+  ensureChannelOwner, personalChannelOf, saveChannelHint,
+} from '../services/channels.js';
+import {
+  appendEvent, eventTime, hasReturnedSince, projectMembership, isMember,
+} from '../services/events.js';
+import { findPairByCounterpartUser, setPairState } from '../services/pairs.js';
+import {
+  matchKeyboard, renderMatchCard, resolveCounterpartOnJoin,
+} from '../services/subscribers.js';
+import {
+  channelLabel, createLeaveTriage, renderTriageCard, triageKeyboard,
+} from '../services/triage.js';
 import { InlineKeyboard } from 'grammy';
 
 /**
@@ -19,7 +29,9 @@ const triageWorker = new Worker<TriageLeaveJob>(
   async (job) => {
     const { chatId, userId, eventId } = job.data;
 
-    const ownerUserId = await ownerOfChannel(chatId);
+    // Не ownerOfChannel: если онбординг §14 не достал creator, владельца надо
+    // добрать здесь, иначе разбор уходов по этому каналу не заработает никогда.
+    const ownerUserId = await ensureChannelOwner(bot.api, chatId);
     if (!ownerUserId) return;
 
     if (await hasReturnedSince(chatId, userId, eventId)) {
@@ -29,6 +41,10 @@ const triageWorker = new Worker<TriageLeaveJob>(
     }
 
     const pair = await findPairByCounterpartUser(ownerUserId, userId);
+
+    // Владелец отписался сам — вопрос закрыт. Воскрешать пару нельзя: бот
+    // написал бы «ты всё ещё подписан», хотя это уже неправда.
+    if (pair?.state === 'closed') return;
 
     if (pair) {
       await setPairState(pair.id, 'broken');
@@ -47,22 +63,60 @@ const triageWorker = new Worker<TriageLeaveJob>(
       return;
     }
 
+    // RFC §8.3 п.1: подсказка канала. Уходит в карточку как предположение,
+    // связь пишется с confidence='personal' — действовать по ней нельзя.
+    const hint = await personalChannelOf(bot.api, userId);
+    if (hint) await saveChannelHint(userId, hint);
+
+    // RFC §10: время ухода — из лога. Здесь мы минимум на grace позже события,
+    // поэтому new Date() с пометкой 'exact' был бы прямой ложью в карточке.
+    const leave = await eventTime(eventId);
+
     const created = await createLeaveTriage({
       ownerUserId, chatId, userId,
-      leftAt: new Date(),
-      leftAtPrecision: 'exact',
+      leftAt: leave?.at ?? new Date(),
+      leftAtPrecision: leave?.atPrecision ?? 'window',
+      channelHint: hint ?? undefined,
     });
     if (!created) return;
 
-    const kb = new InlineKeyboard()
-      .text('Да, мью', `t:${created.id}:y`)
-      .text('Нет', `t:${created.id}:n`)
-      .text('Не помню', `t:${created.id}:s`);
     await bot.api.sendMessage(ownerUserId, renderTriageCard(created.payload), {
-      reply_markup: kb,
+      reply_markup: triageKeyboard(created),
     }).catch(() => {});
   },
   { connection, concurrency: 4 },
+);
+
+/**
+ * RFC §8.4. Подписался человек — не тот ли это контрагент, чей канал уже лежит
+ * в журнале мью без user_id. Отдельный воркер, потому что здесь возможен
+ * getChat, а join — самое частое событие канала.
+ */
+const matchWorker = new Worker<MatchJoinJob>(
+  'match',
+  async (job) => {
+    const { chatId, userId } = job.data;
+
+    const ownerUserId = await ensureChannelOwner(bot.api, chatId);
+    if (!ownerUserId) return;
+
+    const outcome = await resolveCounterpartOnJoin(bot.api, ownerUserId, chatId, userId);
+    if (outcome.kind === 'none') return;
+
+    if (outcome.kind === 'linked') {
+      await bot.api.sendMessage(
+        ownerUserId,
+        `🔗 ${outcome.who} подписался в ответ — мью с ${channelLabel(outcome.channel)} `
+        + 'теперь под наблюдением. Если уйдёт, скажу.',
+      ).catch(() => {});
+      return;
+    }
+
+    await bot.api.sendMessage(ownerUserId, renderMatchCard(outcome.ask), {
+      reply_markup: matchKeyboard(outcome.ask.itemId),
+    }).catch(() => {});
+  },
+  { connection, concurrency: 2 },
 );
 
 /**
@@ -118,7 +172,7 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-for (const w of [triageWorker, reconcileWorker]) {
+for (const w of [triageWorker, matchWorker, reconcileWorker]) {
   w.on('failed', (job, err) => console.error('job failed', job?.id, err));
 }
 

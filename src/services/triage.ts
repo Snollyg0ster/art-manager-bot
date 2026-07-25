@@ -1,7 +1,9 @@
+import { InlineKeyboard } from 'grammy';
 import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import {
-  membershipEvents, memberships, triageItems, users, type TriagePayload,
+  membershipEvents, memberships, triageItems, users,
+  type ChannelHint, type TriagePayload,
 } from '../db/schema.js';
 
 export type TriageItem = {
@@ -22,6 +24,11 @@ function who(p: TriagePayload): string {
   const handle = p.username ? `@${p.username}` : null;
   if (handle && p.displayName) return `${handle} (${p.displayName})`;
   return handle ?? p.displayName ?? `id${p.userId}`;
+}
+
+export function channelLabel(hint: ChannelHint): string {
+  if (hint.username) return `@${hint.username}`;
+  return hint.title ?? `id${hint.chatId}`;
 }
 
 /**
@@ -48,11 +55,36 @@ export function renderTriageCard(p: TriagePayload): string {
 
   if (p.awaitingChannel) {
     lines.push('', '   Пришли @handle его канала — проверю и запишу.');
-  } else {
-    lines.push('', '   Это мью?');
+    return lines.join('\n');
   }
 
+  // RFC §8.3: уровень 'personal' идёт с пометкой «предположение» и требует
+  // подтверждения — из профиля мог быть привязан любой канал.
+  if (p.channelHint) {
+    lines.push(`   Канал в его профиле: ${channelLabel(p.channelHint)} (предположение)`);
+  }
+
+  lines.push('', '   Это мью?');
+
   return lines.join('\n');
+}
+
+/**
+ * Клавиатура карточки. С подсказкой §8.3 п.1 первая кнопка подтверждает
+ * найденный канал, вторая оставляет путь на ручной ввод (§8.3 п.3).
+ */
+export function triageKeyboard(item: TriageItem): InlineKeyboard {
+  const hint = item.payload.channelHint;
+  const kb = new InlineKeyboard();
+
+  if (hint) {
+    kb.text(`Да, это ${channelLabel(hint)}`, `t:${item.id}:h`).row();
+    kb.text('Да, но канал другой', `t:${item.id}:y`).row();
+  } else {
+    kb.text('Да, мью', `t:${item.id}:y`);
+  }
+
+  return kb.text('Нет', `t:${item.id}:n`).text('Не помню', `t:${item.id}:s`);
 }
 
 export type CreateLeaveTriageInput = {
@@ -61,6 +93,8 @@ export type CreateLeaveTriageInput = {
   userId: number;
   leftAt: Date;
   leftAtPrecision: 'exact' | 'window';
+  /** RFC §8.3 п.1, если personal_chat нашёлся. */
+  channelHint?: ChannelHint;
 };
 
 /**
@@ -70,7 +104,7 @@ export type CreateLeaveTriageInput = {
 export async function createLeaveTriage(
   input: CreateLeaveTriageInput,
 ): Promise<TriageItem | null> {
-  const { ownerUserId, chatId, userId, leftAt, leftAtPrecision } = input;
+  const { ownerUserId, chatId, userId, leftAt, leftAtPrecision, channelHint } = input;
 
   const [dupe] = await db
     .select({ id: triageItems.id })
@@ -118,22 +152,33 @@ export async function createLeaveTriage(
     leftAtPrecision,
     memberSince: joined?.at.toISOString() ?? null,
     leaveCount: m?.leaveCount ?? 1,
+    ...(channelHint ? { channelHint } : {}),
   };
 
   const [row] = await db
     .insert(triageItems)
     .values({ ownerUserId, kind: 'left', payload, state: 'open' })
-    .returning({ id: triageItems.id, payload: triageItems.payload });
+    .returning({ id: triageItems.id });
 
-  return row ?? null;
+  return row ? { id: row.id, payload } : null;
 }
 
+/**
+ * Только карточки ухода: рядом в таблице живут kind='joined' (новые подписчики),
+ * и в ветку §8.2 они попадать не должны. Отсюда же cast payload — форма
+ * гарантирована условием по kind.
+ */
 export async function openTriageItems(ownerUserId: number): Promise<TriageItem[]> {
-  return db
+  const rows = await db
     .select({ id: triageItems.id, payload: triageItems.payload })
     .from(triageItems)
-    .where(and(eq(triageItems.ownerUserId, ownerUserId), eq(triageItems.state, 'open')))
+    .where(and(
+      eq(triageItems.ownerUserId, ownerUserId),
+      eq(triageItems.kind, 'left'),
+      eq(triageItems.state, 'open'),
+    ))
     .orderBy(asc(triageItems.id));
+  return rows.map((r) => ({ id: r.id, payload: r.payload as TriagePayload }));
 }
 
 export async function getTriageItem(
@@ -143,9 +188,13 @@ export async function getTriageItem(
   const [row] = await db
     .select({ id: triageItems.id, payload: triageItems.payload })
     .from(triageItems)
-    .where(and(eq(triageItems.id, itemId), eq(triageItems.ownerUserId, ownerUserId)))
+    .where(and(
+      eq(triageItems.id, itemId),
+      eq(triageItems.ownerUserId, ownerUserId),
+      eq(triageItems.kind, 'left'),
+    ))
     .limit(1);
-  return row ?? null;
+  return row ? { id: row.id, payload: row.payload as TriagePayload } : null;
 }
 
 /**
@@ -168,12 +217,13 @@ export async function awaitingChannelItem(ownerUserId: number): Promise<TriageIt
     .from(triageItems)
     .where(and(
       eq(triageItems.ownerUserId, ownerUserId),
+      eq(triageItems.kind, 'left'),
       eq(triageItems.state, 'open'),
       sql`${triageItems.payload}->>'awaitingChannel' = 'true'`,
     ))
     .orderBy(desc(triageItems.id))
     .limit(1);
-  return row ?? null;
+  return row ? { id: row.id, payload: row.payload as TriagePayload } : null;
 }
 
 export async function setTriageState(

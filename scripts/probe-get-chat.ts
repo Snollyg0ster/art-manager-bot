@@ -6,11 +6,20 @@
  * Ответ определяет, есть ли в §8.3 автоподстановка канала.
  *
  * Как проверять:
- *  1. Добавь бота админом в тестовый канал.
- *  2. Со второго аккаунта (с привязанным личным каналом в профиле,
+ *  1. Подними окружение и бота (docker compose up -d, db:migrate, npm run dev) —
+ *     без этого chat_member негде взять.
+ *  2. Добавь бота админом в тестовый канал.
+ *  3. Со второго аккаунта (с привязанным личным каналом в профиле,
  *     и НЕ запуская бота) подпишись на канал.
- *  3. Возьми его user_id из лога chat_member.
- *  4. npm run probe -- <user_id>
+ *  4. Возьми его user_id из лога событий — в консоль он не печатается,
+ *     хэндлер сразу пишет его в Postgres:
+ *       docker compose exec db psql -U mutual -d mutual -c \
+ *         'select user_id, event, at from membership_events order by id desc limit 5;'
+ *     Либо npm run db:studio, таблицы membership_events / users.
+ *  5. npm run probe -- <user_id>
+ *
+ * Сам скрипт автономный: читает только .env (BOT_TOKEN), в Postgres и Redis
+ * не ходит, запущенный бот ему не нужен.
  */
 import { Bot } from 'grammy';
 import { config } from '../src/config.js';

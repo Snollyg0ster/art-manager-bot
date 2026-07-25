@@ -133,6 +133,23 @@ export async function hasReturnedSince(
   return rows.length > 0;
 }
 
+/**
+ * Время и точность события по его id. Нужно карточке триажа: задача приходит
+ * не раньше чем через grace, и RFC §10 прямо запрещает выдавать время
+ * обнаружения за время ухода.
+ */
+export async function eventTime(
+  eventId: number,
+): Promise<{ at: Date; atPrecision: 'exact' | 'window' } | null> {
+  const [row] = await db
+    .select({ at: membershipEvents.at, atPrecision: membershipEvents.atPrecision })
+    .from(membershipEvents)
+    .where(eq(membershipEvents.id, eventId))
+    .limit(1);
+  if (!row) return null;
+  return { at: row.at, atPrecision: row.atPrecision === 'window' ? 'window' : 'exact' };
+}
+
 export async function upsertUser(u: {
   id: number;
   username?: string;

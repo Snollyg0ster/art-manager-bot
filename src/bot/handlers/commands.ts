@@ -3,53 +3,87 @@ import { eq } from 'drizzle-orm';
 import { config } from '../../config.js';
 import { db } from '../../db/index.js';
 import { channels, triageItems } from '../../db/schema.js';
-import { buildReport, renderReport } from '../../services/report.js';
-import { nextUnlabeled, addUnresolvedPair, bindAndBreak } from '../../services/pairs.js';
+import {
+  addUnresolvedPair, bindAndBreak, dropSub, mutualSubByChat,
+} from '../../services/pairs.js';
 import {
   parseExport, parseHandleList, saveImported, normalizeChannelId,
 } from '../../services/import.js';
-import {
-  awaitingChannelItem, openTriageItems, renderTriageCard, setAwaitingChannel,
-} from '../../services/triage.js';
+import { awaitingChannelItem, setAwaitingChannel } from '../../services/triage.js';
 import { upsertUser } from '../../services/events.js';
+import {
+  helpScreen, importScreen, labelScreen, mainMenu, mutualsScreen, newSubsScreen,
+  reportScreen, startScreen, triageScreen, type Screen,
+} from '../screens.js';
+
+/** Команды дублируют кнопки: то же действие, тот же экран. */
+export const COMMANDS = [
+  { command: 'start', description: 'меню и как начать' },
+  { command: 'report', description: 'отчёт: кто ушёл, кто подписался' },
+  { command: 'triage', description: 'разобрать уходы' },
+  { command: 'new', description: 'новые подписчики' },
+  { command: 'label', description: 'разметить подписки' },
+  { command: 'unsub', description: 'я отписался: список или /unsub @channel' },
+  { command: 'import', description: 'загрузить список подписок' },
+  { command: 'add', description: 'добавить мью вручную: /add @channel' },
+  { command: 'help', description: 'как это работает' },
+  { command: 'delete_me', description: 'удалить все мои данные' },
+];
 
 export function registerCommands(bot: Bot): void {
   bot.command('start', async (ctx) => {
     await upsertUser(ctx.from!);
-    await ctx.reply([
-      'Веду учёт взаимных подписок.',
-      '',
-      'Чтобы начать: добавь меня администратором в свой канал.',
-      'Права можно не выдавать никакие — мне нужен только доступ к событиям.',
-      '',
-      'Что я умею:',
-      '/import — загрузить список твоих подписок',
-      '/label — разметить их (мью / не мью)',
-      '/add @channel — добавить мью вручную',
-      '/triage — разобрать уходы',
-      '/report — отчёт',
-      '/delete_me — удалить все мои данные о тебе',
-    ].join('\n'));
+    await send(ctx, startScreen());
+  });
+
+  bot.command('help', async (ctx) => {
+    await send(ctx, helpScreen());
   });
 
   bot.command('report', async (ctx) => {
-    const report = await buildReport(ctx.from!.id);
-    await ctx.reply(renderReport(report));
+    await send(ctx, await reportScreen(ctx.api, ctx.from!.id));
   });
 
   bot.command('import', async (ctx) => {
-    await ctx.reply([
-      'Два пути.',
-      '',
-      '1. Быстрый: пришли список каналов текстом, по одному в строке.',
-      '   Можно @handle или ссылки t.me.',
-      '',
-      '2. Полный: Telegram Desktop → Settings → Advanced → Export Telegram data.',
-      '   Выбери только Public channels и Private channels, формат JSON,',
-      '   размер медиа выстави в минимум. Пришли мне result.json файлом.',
-      '',
-      `Лимит на файл: ${Math.round(config.maxExportBytes / 1024 / 1024)} МБ.`,
-    ].join('\n'));
+    await send(ctx, importScreen());
+  });
+
+  bot.command('label', async (ctx) => {
+    await send(ctx, await labelScreen(ctx.from!.id));
+  });
+
+  bot.command('triage', async (ctx) => {
+    await send(ctx, await triageScreen(ctx.from!.id));
+  });
+
+  bot.command('new', async (ctx) => {
+    await send(ctx, await newSubsScreen(ctx.api, ctx.from!.id));
+  });
+
+  bot.command('unsub', async (ctx) => {
+    const arg = ctx.match?.toString().trim();
+    if (!arg) return void send(ctx, await mutualsScreen(ctx.from!.id));
+
+    // Быстрый путь при длинном журнале: канал называют, а не ищут кнопкой.
+    const handle = arg.replace(/^https?:\/\/t\.me\//i, '').replace(/^@/, '');
+    try {
+      const chat = await ctx.api.getChat(`@${handle}`);
+      const sub = await mutualSubByChat(ctx.from!.id, chat.id);
+      if (!sub) {
+        return void ctx.reply(
+          `@${handle} среди действующих мью не нашёл. Открой список кнопкой.`,
+          { reply_markup: new InlineKeyboard().text('🚪 Я отписался', 'm:mutuals') },
+        );
+      }
+
+      await dropSub(sub.id, ctx.from!.id);
+      await ctx.reply(
+        `Записал: ты больше не подписан на @${handle}. Из журнала мью убрал.`,
+        { reply_markup: mainMenu() },
+      );
+    } catch {
+      await ctx.reply('Не нашёл такой публичный канал. Приватные — только кнопкой из списка.');
+    }
   });
 
   bot.command('add', async (ctx) => {
@@ -74,30 +108,17 @@ export function registerCommands(bot: Bot): void {
       await ctx.reply(
         `Записал мью с @${handle}.\n` +
         'Кто им владеет — выяснится, когда этот человек что-нибудь сделает в твоём канале.',
+        { reply_markup: mainMenu() },
       );
     } catch {
       await ctx.reply('Не нашёл такой публичный канал. Приватные так добавить нельзя.');
     }
   });
 
-  bot.command('label', async (ctx) => {
-    await sendNextLabel(ctx.from!.id, (text, kb) => ctx.reply(text, { reply_markup: kb }));
-  });
-
-  bot.command('triage', async (ctx) => {
-    const items = await openTriageItems(ctx.from!.id);
-    const item = items.find((i) => !i.payload.awaitingChannel);
-    if (!item) return void ctx.reply('Разбирать нечего.');
-
-    const kb = new InlineKeyboard()
-      .text('Да, мью', `t:${item.id}:y`)
-      .text('Нет', `t:${item.id}:n`)
-      .text('Не помню', `t:${item.id}:s`);
-    await ctx.reply(renderTriageCard(item.payload), { reply_markup: kb });
-  });
-
   bot.command('delete_me', async (ctx) => {
-    const kb = new InlineKeyboard().text('Да, удалить всё', 'wipe:yes');
+    const kb = new InlineKeyboard()
+      .text('Да, удалить всё', 'wipe:yes').row()
+      .text('‹ Меню', 'm:menu');
     await ctx.reply(
       'Удалю канал, журнал мью и весь лог событий по твоему каналу. Это необратимо.',
       { reply_markup: kb },
@@ -125,8 +146,8 @@ export function registerCommands(bot: Bot): void {
       const items = parseExport(json);
       const saved = await saveImported(ctx.from!.id, items, 'export');
       await ctx.reply(
-        `Нашёл каналов: ${items.length}, новых записал: ${saved}.\n` +
-        'Теперь /label — разметить, где у тебя мью.',
+        `Нашёл каналов: ${items.length}, новых записал: ${saved}.`,
+        { reply_markup: new InlineKeyboard().text('🏷 Разметить', 'm:label') },
       );
     } catch (e) {
       console.error('export import failed', e);
@@ -165,8 +186,9 @@ export function registerCommands(bot: Bot): void {
           .where(eq(triageItems.id, pending.id));
 
         await ctx.reply(
-          `Записал. @${handle} — в списке на отписку, /report покажет.\n` +
+          `Записал. @${handle} — в списке на отписку, отчёт покажет.\n` +
           'Отписаться нужно руками: бот этого не умеет и уметь не может.',
+          { reply_markup: new InlineKeyboard().text('📊 Отчёт', 'm:report') },
         );
       } catch {
         await ctx.reply('Не нашёл такой публичный канал.');
@@ -175,7 +197,11 @@ export function registerCommands(bot: Bot): void {
     }
 
     const handles = parseHandleList(ctx.message.text);
-    if (handles.length === 0) return;
+    if (handles.length === 0) {
+      return void ctx.reply('Не понял. Открой меню — там всё кнопками.', {
+        reply_markup: mainMenu(),
+      });
+    }
 
     let ok = 0;
     for (const h of handles.slice(0, 50)) {
@@ -190,23 +216,14 @@ export function registerCommands(bot: Bot): void {
         ok += 1;
       } catch { /* пропускаем нерезолвящиеся */ }
     }
-    await ctx.reply(`Записал подписок: ${ok} из ${handles.length}.\nДальше /label.`);
+    await ctx.reply(`Записал подписок: ${ok} из ${handles.length}.`, {
+      reply_markup: new InlineKeyboard().text('🏷 Разметить', 'm:label'),
+    });
   });
 }
 
-export async function sendNextLabel(
-  ownerUserId: number,
-  send: (text: string, kb: InlineKeyboard) => Promise<unknown>,
-): Promise<void> {
-  const next = await nextUnlabeled(ownerUserId);
-  if (!next) {
-    await send('Всё размечено.', new InlineKeyboard());
-    return;
-  }
-  const handle = next.username ? `@${next.username}` : (next.title ?? `id${next.chatId}`);
-  const kb = new InlineKeyboard()
-    .text('Мью', `l:${next.id}:m`)
-    .text('Не мью', `l:${next.id}:n`)
-    .text('Пропустить', `l:${next.id}:s`);
-  await send(`${handle}\nЭто взаимная подписка?`, kb);
+type Replier = { reply: (text: string, other?: { reply_markup: InlineKeyboard }) => Promise<unknown> };
+
+export async function send(ctx: Replier, screen: Screen): Promise<void> {
+  await ctx.reply(screen.text, { reply_markup: screen.keyboard });
 }

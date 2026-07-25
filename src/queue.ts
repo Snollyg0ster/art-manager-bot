@@ -14,7 +14,18 @@ export type TriageLeaveJob = {
   eventId: number;
 };
 
+/**
+ * RFC §8.4: контрагент подставляется в пару при первом его событии. Работа
+ * уехала в очередь, потому что на подписке может понадобиться getChat, а join —
+ * самое частое событие канала; в хэндлере это упиралось бы в флуд-контроль §5.3.
+ */
+export type MatchJoinJob = {
+  chatId: number;
+  userId: number;
+};
+
 export const triageQueue = new Queue<TriageLeaveJob>('triage', { connection });
+export const matchQueue = new Queue<MatchJoinJob>('match', { connection });
 export const reconcileQueue = new Queue('reconcile', { connection });
 
 /**
@@ -31,6 +42,7 @@ export async function ensureReconcileSchedule(): Promise<void> {
 
 export async function closeQueues(): Promise<void> {
   await triageQueue.close();
+  await matchQueue.close();
   await reconcileQueue.close();
   connection.disconnect();
 }

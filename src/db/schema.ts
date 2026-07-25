@@ -94,17 +94,38 @@ export const pairs = pgTable('pairs', {
   byUser: index('pairs_owner_counterpart_user_idx').on(t.ownerUserId, t.counterpartUserId),
 }));
 
-/** RFC §7. kind: 'left'. state: open | resolved | dismissed */
+/**
+ * kind='match' — вопрос «этот подписавшийся и есть владелец канала, с которым
+ * у тебя мью?». Нужен, чтобы RFC §8.4 («контрагент подставится при первом
+ * событии») не приходилось угадывать: догадку подтверждает владелец.
+ */
+export type MatchPayload = {
+  chatId: number;
+  userId: number;
+  username: string | null;
+  displayName: string | null;
+  pairId: number;
+  channelHint: ChannelHint;
+};
+
+/** RFC §7. kind: 'left' | 'joined' | 'match'. state: open | resolved | dismissed */
 export const triageItems = pgTable('triage_items', {
   id: bigserial('id', { mode: 'number' }).primaryKey(),
   ownerUserId: tgId('owner_user_id').notNull(),
   kind: text('kind').notNull(),
-  payload: jsonb('payload').$type<TriagePayload>().notNull(),
+  payload: jsonb('payload').$type<TriagePayload | JoinedPayload | MatchPayload>().notNull(),
   state: text('state').notNull().default('open'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   byOwner: index('triage_items_owner_state_idx').on(t.ownerUserId, t.state),
 }));
+
+/** RFC §8.3 п.1: канал контрагента, подставленный из getChat(user_id).personal_chat. */
+export type ChannelHint = {
+  chatId: number;
+  username: string | null;
+  title: string | null;
+};
 
 export type TriagePayload = {
   chatId: number;
@@ -117,4 +138,19 @@ export type TriagePayload = {
   leaveCount: number;
   /** true, пока ждём от владельца @handle канала контрагента */
   awaitingChannel?: boolean;
+  /** Подсказка §8.3 п.1. Уровень 'personal' — предположение, требует подтверждения. */
+  channelHint?: ChannelHint;
+};
+
+/**
+ * kind='joined' — новый подписчик, которого владелец ещё не разобрал.
+ * Вид записи зарезервирован в RFC §7 рядом с 'left'.
+ */
+export type JoinedPayload = {
+  chatId: number;
+  userId: number;
+  username: string | null;
+  displayName: string | null;
+  joinedAt: string;
+  channelHint?: ChannelHint;
 };

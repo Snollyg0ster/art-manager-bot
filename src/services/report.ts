@@ -1,7 +1,9 @@
+import type { Api } from 'grammy';
 import { and, asc, count, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { channels, outboundSubs, pairs } from '../db/schema.js';
-import { openTriageItems } from './triage.js';
+import { newSubscribers, type NewSubscribers } from './subscribers.js';
+import { channelLabel, openTriageItems } from './triage.js';
 
 export type ReportChannel = {
   pairId: number;
@@ -15,6 +17,7 @@ export type Report = {
   broken: ReportChannel[];
   returned: ReportChannel[];
   triage: Array<{ id: number; who: string; leftAt: string }>;
+  joined: NewSubscribers;
   unlabeled: number;
   mutual: number;
   total: number;
@@ -35,11 +38,12 @@ function channelsInState(ownerUserId: number, state: 'broken' | 'returned') {
     .orderBy(asc(pairs.stateChangedAt));
 }
 
-export async function buildReport(ownerUserId: number): Promise<Report> {
-  const [broken, returned, triage, stats] = await Promise.all([
+export async function buildReport(api: Api, ownerUserId: number): Promise<Report> {
+  const [broken, returned, triage, joined, stats] = await Promise.all([
     channelsInState(ownerUserId, 'broken'),
     channelsInState(ownerUserId, 'returned'),
     openTriageItems(ownerUserId),
+    newSubscribers(api, ownerUserId),
     db
       .select({
         total: count(),
@@ -65,13 +69,14 @@ export async function buildReport(ownerUserId: number): Promise<Report> {
         who: i.payload.username ? `@${i.payload.username}` : (i.payload.displayName ?? `id${i.payload.userId}`),
         leftAt: i.payload.leftAt,
       })),
+    joined,
     unlabeled: stats[0]?.unlabeled ?? 0,
     mutual: stats[0]?.mutual ?? 0,
     total: stats[0]?.total ?? 0,
   };
 }
 
-function handleOf(c: ReportChannel): string {
+export function handleOf(c: ReportChannel): string {
   if (c.username) return `@${c.username}`;
   return c.title ?? `id${c.chatId}`;
 }
@@ -107,14 +112,31 @@ export function renderReport(r: Report): string {
     blocks.push([
       `📥 Требуют разбора (${r.triage.length})`,
       ...r.triage.map((t) => `   ${t.who} ушёл ${ago(t.leftAt)} — это было мью?`),
-      '   /triage — разобрать.',
+      '   Кнопка «Разобрать уходы» ниже.',
+    ].join('\n'));
+  }
+
+  if (r.joined.items.length > 0) {
+    const total = r.joined.items.length + r.joined.more;
+    blocks.push([
+      `➕ Подписались на тебя (${total})`,
+      ...r.joined.items.map((s) => {
+        // Канал знаем не всегда: он есть только у тех, кто привязал его к профилю.
+        const where = s.channel
+          ? `его канал ${channelLabel(s.channel)} (предположение)`
+          : 'канал неизвестен';
+        return `   ${s.who} — ${ago(s.joinedAt)}, ${where}`;
+      }),
+      ...(r.joined.more > 0 ? [`   …и ещё ${r.joined.more} — покажу следующей пачкой.`] : []),
+      '   Ты им в ответ не подписан. Кнопка «Новые подписчики» ниже.',
     ].join('\n'));
   }
 
   blocks.push(
     r.total === 0
-      ? '🔍 Подписок пока нет — /import загрузит список.'
-      : `🔍 Не размечено (${r.unlabeled} из ${r.total} подписок)\n   /label — разметить.`,
+      ? '🔍 Подписок пока нет — кнопка «Загрузить подписки» ниже.'
+      : `🔍 Не размечено (${r.unlabeled} из ${r.total} подписок)\n`
+        + '   Кнопка «Разметить» ниже.',
   );
 
   blocks.push(`✅ Взаимно (${r.mutual})`);
