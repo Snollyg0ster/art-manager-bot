@@ -1,0 +1,35 @@
+{
+  "name": "art-manager-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Бот учёта взаимных подписок для каналов художников (RFC ревизия 2)",
+  "type": "module",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "worker": "tsx watch src/workers/index.ts",
+    "start": "node --experimental-strip-types src/index.ts",
+    "start:worker": "node --experimental-strip-types src/workers/index.ts",
+    "probe": "tsx scripts/probe-get-chat.ts",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio"
+  },
+  "dependencies": {
+    "bullmq": "^5.81.2",
+    "dotenv": "^17.4.2",
+    "drizzle-orm": "^0.45.2",
+    "grammy": "^1.45.1",
+    "ioredis": "^5.11.1",
+    "postgres": "^3.4.9"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "drizzle-kit": "^0.31.10",
+    "tsx": "^4.23.1",
+    "typescript": "^5.9.3"
+  }
+}
