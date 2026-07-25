@@ -2,7 +2,7 @@ import { Worker } from 'bullmq';
 import { eq } from 'drizzle-orm';
 import { bot } from '../bot/index.js';
 import { connection, type MatchJoinJob, type TriageLeaveJob } from '../queue.js';
-import { db } from '../db/index.js';
+import { closeDb, db } from '../db/index.js';
 import { channels, pairs } from '../db/schema.js';
 import {
   ensureChannelOwner, personalChannelOf, saveChannelHint,
@@ -172,8 +172,25 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-for (const w of [triageWorker, matchWorker, reconcileWorker]) {
+const workers = [triageWorker, matchWorker, reconcileWorker];
+
+for (const w of workers) {
   w.on('failed', (job, err) => console.error('job failed', job?.id, err));
 }
+
+/**
+ * Остановка по сигналу: close() даёт текущей задаче дойти до конца и снимает
+ * lock. Без него убитый на середине воркер держит задачу занятой до истечения
+ * lockDuration — уход подписчика разбирался бы с лишней минутой задержки.
+ */
+const stop = async (signal: string) => {
+  console.log(`${signal}: останавливаюсь`);
+  await Promise.all(workers.map((w) => w.close()));
+  connection.disconnect();
+  await closeDb();
+  process.exit(0);
+};
+process.once('SIGINT', () => void stop('SIGINT'));
+process.once('SIGTERM', () => void stop('SIGTERM'));
 
 console.log('workers up');

@@ -62,15 +62,59 @@ src/bot/handlers/         commands, callbacks, chat-member
 src/services/             events, channels, pairs, triage, subscribers, import, report
 src/workers/index.ts      triage + reconcile, отдельным процессом
 scripts/probe-get-chat.ts блокирующая проверка §5.2
+scripts/service.sh        фоновый запуск и остановка, за ним npm run up/down
 ```
 
 ## Запуск
 
+Первый раз:
+
 ```bash
 cp .env.example .env       # вписать BOT_TOKEN
-docker compose up -d
 npm install
+docker compose up -d
 npm run db:generate && npm run db:migrate
+```
+
+Дальше — одна команда на всё:
+
+```bash
+npm run up                 # docker + бот + воркеры, фоном
+```
+
+Бот и воркеры — два разных процесса, но `npm run up` поднимает оба и ждёт
+healthcheck'и Postgres и Redis, чтобы бот не стартовал раньше базы. Запущенное
+фоном переживает закрытие консоли: pid-файлы лежат в `.run/`, логи — в `logs/`.
+
+| Команда | Что делает |
+|---|---|
+| `npm run up` | docker + бот + воркеры фоном |
+| `npm run down` | остановить всё, включая контейнеры |
+| `npm start` | бот + воркеры фоном (docker уже поднят) |
+| `npm stop` | остановить оба процесса |
+| `npm run restart` | перезапустить оба |
+| `npm run status` | кто жив, с uptime, плюс `docker compose ps` |
+| `npm run logs` | `tail -f` по обоим логам |
+
+Любая из них сужается до одного процесса — `bot` или `worker`:
+
+```bash
+npm start -- bot
+npm stop -- worker
+npm run logs -- worker
+```
+
+Остановка идёт по `SIGTERM`, у обоих процессов есть обработчик: бот гасит long
+polling и закрывает очереди, воркеры дожидаются конца текущей задачи и снимают
+lock. `SIGKILL` только если за 10 секунд процесс не ушёл сам.
+
+`npm run down` контейнеры останавливает, но не удаляет — данные и так лежат в
+volume, а следующий `npm run up` поднимется быстрее. Снести совсем —
+`docker compose down`.
+
+Разработка — по-прежнему в переднем плане, с автоперезапуском на правку файлов:
+
+```bash
 npm run dev                # бот
 npm run worker             # воркеры, отдельным процессом
 ```
