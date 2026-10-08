@@ -122,8 +122,10 @@ case "$cmd" in
 
   up)
     # --wait: ждём healthcheck'и из docker-compose.yml. Без этого бот стартует
-    # раньше Postgres и падает на первом запросе.
-    docker compose up -d --wait
+    # раньше Postgres и падает на первом запросе. Только db и redis: bot и
+    # worker из compose — серверный режим, вместе с локальными они устроили бы
+    # два long polling на один токен (409 Conflict).
+    docker compose up -d --wait db redis
     for s in $(targets "$@"); do start_one "$s"; done
     ;;
 

@@ -1,6 +1,7 @@
 services:
   db:
     image: postgres:17-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: mutual
       POSTGRES_PASSWORD: mutual
@@ -17,6 +18,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     command: ['redis-server', '--appendonly', 'yes']
     ports:
       - '127.0.0.1:6379:6379'
@@ -27,6 +29,43 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # Бот, воркеры и миграции в контейнерах — серверный режим, для работы 24/7.
+  # Для разработки по-прежнему npm run up/dev: им хватает db и redis выше.
+  # Адреса переопределяют .env: внутри сети compose база — это db, а не 127.0.0.1.
+  migrate:
+    build: .
+    command: ['node_modules/.bin/drizzle-kit', 'migrate']
+    env_file: .env
+    environment: &internal
+      DATABASE_URL: postgres://mutual:mutual@db:5432/mutual
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      db:
+        condition: service_healthy
+
+  bot:
+    build: .
+    command: ['node_modules/.bin/tsx', 'src/index.ts']
+    restart: unless-stopped
+    # init: SIGTERM от docker stop доходит до обработчика, а не теряется на PID 1.
+    init: true
+    env_file: .env
+    environment: *internal
+    depends_on: &ready
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: ['node_modules/.bin/tsx', 'src/workers/index.ts']
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment: *internal
+    depends_on: *ready
 
 volumes:
   pgdata:
