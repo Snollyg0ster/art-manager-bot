@@ -119,6 +119,33 @@ npm run dev                # бот
 npm run worker             # воркеры, отдельным процессом
 ```
 
+### Сервер (24/7)
+
+На сервере бот, воркеры и миграции работают в контейнерах из того же
+`docker-compose.yml`. Node на хосте не нужен:
+
+```bash
+cp .env.example .env       # вписать BOT_TOKEN
+docker compose up -d --build
+```
+
+Сначала поднимаются `db` и `redis`, затем одноразовый `migrate`
+(`drizzle-kit migrate` по закоммиченным миграциям), а после его успешного
+завершения стартуют `bot` и `worker`. У всех долгоживущих сервисов стоит
+`restart: unless-stopped`: после перезапуска docker они встают сами. Адреса
+базы и Redis внутри сети compose задаются в самом compose и перекрывают `.env`.
+
+| Команда | Что делает |
+|---|---|
+| `docker compose logs -f bot worker` | логи |
+| `docker compose restart bot worker` | перезапуск |
+| `git pull && docker compose up -d --build` | обновление, миграции применятся сами |
+| `docker compose ps -a` | статусы, у `migrate` должно быть `Exited (0)` |
+
+Серверный режим и `npm run up` на одном токене одновременно не запускать: два
+long polling дадут `409 Conflict`. `npm run up` поднимает только `db` и
+`redis`.
+
 ## Порядок работ
 
 Сначала инфраструктура, только потом проба §5.2: `user_id` для неё берётся из
